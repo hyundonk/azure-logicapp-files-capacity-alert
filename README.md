@@ -6,7 +6,33 @@
 
 Azure Premium Files을 사용하려면 미리 사용할 용량을 설정해야 합니다.  이 설정된 용량에 따라 사용할 수 있는 용량 (GiB) 및 IOPS/throughput 성능이 정해집니다.
 
-본 Logic App template은 Azure Premium Files를 사용하다가 사용 용량이 설정된 용량(fileShareCapacityQuota)의 특정 %(e.g. 80%)를 넘으면 Slack app으로 Alert을 보내는 workflow를 배포합니다. 
+설정된 용량대비 현재 사용량을 확인하려면 아래와 같이 Azure CLI를 이용하여 FileShareCapacityQuota metric과 FileCapacity metric 을 비교하면 됩니다. 
+
+```bash
+#!/bin/bash
+
+subscription_id={enter subscription id here}
+storageaccount_name={enter azure files storage account name here}
+resourcegroup_name={enter resource group name here}
+
+capacityQuota=$(az monitor metrics list --resource /subscriptions/${subscription_id}/resourceGroups/${resourcegroup_name}/providers/Microsoft.Storage/storageAccounts/${storageaccount_name}/fileServices/default --metric "FileShareCapacityQuota" --interval 1h --query value[0].timeseries[0].data[0].average)
+
+currentSize=$(az monitor metrics list --resource /subscriptions/${subscription_id}/resourceGroups/${resourcegroup_name}/providers/Microsoft.Storage/storageAccounts/${storageaccount_name}/fileServices/default --metric "FileCapacity" --interval 1h --query value[0].timeseries[0].data[0].average)
+
+let "usage = ${currentSize%.*} * 100 / ${capacityQuota%.*}"
+
+echo "capacity quota is $capacityQuota"
+echo "current size is $currentSize"
+echo "current usage is $usage percent"
+
+if [ $usage -ge 80 ]; then
+  echo "send alert"
+fi
+```
+
+
+
+본 respository의 template.json은 Azure CLI 대신 Logic App을 이용하여 별도의 VM배포 없이 Logic App workflow를 수행합니다. 이 workflow에서는 주기적 (default 10 분)으로 위 metric을 check하여 Azure Premium Files의 현재 사용 용량(FileCapacity)이 설정된 용량(fileShareCapacityQuota)의 특정 %(e.g. 80%)를 넘으면 Slack app으로 Alert을 보냅니다. 
 
 
 
