@@ -1,0 +1,539 @@
+{
+    "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+    "contentVersion": "1.0.0.0",
+    "parameters": {
+        "workflows_name": {
+            "type": "String"
+        },
+        "connections_slack_name": {
+            "defaultValue": "slack",
+            "type": "String"
+        },
+        "connections_azurefile_name": {
+            "defaultValue": "azurefile",
+            "type": "String"
+        },
+        "storageaccount_resourcegroup": {
+            "type": "String"
+        },
+        "storageaccountname": {
+            "type": "String"
+        },
+        "threshold_percentage": {
+            "type": "String"
+        }
+    },
+    "variables": {},
+    "resources": [
+        {
+            "type": "Microsoft.Web/connections",
+            "apiVersion": "2016-06-01",
+            "name": "[parameters('connections_azurefile_name')]",
+            "location": "[resourceGroup().location]",
+            "kind": "V1",
+            "properties": {
+                "displayName": "azurefileconnection",
+                "customParameterValues": {},
+                "api": {
+                    "id": "[subscriptionResourceId('Microsoft.Web/locations/managedApis', resourceGroup().location, parameters('connections_azurefile_name'))]"
+                }
+            }
+        },
+        {
+            "type": "Microsoft.Web/connections",
+            "apiVersion": "2016-06-01",
+            "name": "[parameters('connections_slack_name')]",
+            "location": "[resourceGroup().location]",
+            "kind": "V1",
+            "properties": {
+                "displayName": "slackconnection",
+                "customParameterValues": {},
+                "api": {
+                    "id": "[subscriptionResourceId('Microsoft.Web/locations/managedApis', resourceGroup().location, parameters('connections_slack_name'))]"
+                }
+            }
+        },
+        {
+            "type": "Microsoft.Logic/workflows",
+            "apiVersion": "2017-07-01",
+            "name": "[parameters('workflows_name')]",
+            "location": "[resourceGroup().location]",
+            "identity": {
+                "type": "SystemAssigned"
+            },
+            "properties": {
+                "state": "Enabled",
+                "definition": {
+                    "$schema": "https://schema.management.azure.com/providers/Microsoft.Logic/schemas/2016-06-01/workflowdefinition.json#",
+                    "contentVersion": "1.0.0.0",
+                    "parameters": {
+                        "$connections": {
+                            "defaultValue": {},
+                            "type": "Object"
+                        }
+                    },
+                    "triggers": {
+                        "Recurrence": {
+                            "recurrence": {
+                                "frequency": "Minute",
+                                "interval": 10
+                            },
+                            "type": "Recurrence"
+                        }
+                    },
+                    "actions": {
+                        "Append_to_string_variable": {
+                            "runAfter": {
+                                "calculate_fileShareUsagePercent": [
+                                    "Succeeded"
+                                ]
+                            },
+                            "type": "AppendToStringVariable",
+                            "inputs": {
+                                "name": "processlog",
+                                "value": "FileCapacity: @{variables('fileCapacity')}, FileShareCapacityQuota: @{variables('fileShareCapacityQuota')}, fileShareUsagePercent: @{variables('fileShareUsagePercent')}"
+                            }
+                        },
+                        "Condition": {
+                            "actions": {
+                                "Post_message": {
+                                    "runAfter": {},
+                                    "type": "ApiConnection",
+                                    "inputs": {
+                                        "host": {
+                                            "connection": {
+                                                "name": "@parameters('$connections')['slack']['connectionId']"
+                                            }
+                                        },
+                                        "method": "post",
+                                        "path": "/chat.postMessage",
+                                        "queries": {
+                                            "channel": "C8ZNEA29H",
+                                            "text": "[[[Azure Files Share Capacity Alert] @{variables('processlog')}"
+                                        }
+                                    }
+                                }
+                            },
+                            "runAfter": {
+                                "Append_to_string_variable": [
+                                    "Succeeded"
+                                ]
+                            },
+                            "else": {
+                                "actions": {
+                                    "exit_log": {
+                                        "runAfter": {},
+                                        "type": "AppendToStringVariable",
+                                        "inputs": {
+                                            "name": "processlog",
+                                            "value": "usage is under @{variables('threshold-percentage')}. "
+                                        }
+                                    }
+                                }
+                            },
+                            "expression": {
+                                "and": [
+                                    {
+                                        "greaterOrEquals": [
+                                            "@variables('fileShareUsagePercent')",
+                                            "@variables('threshold-percentage')"
+                                        ]
+                                    }
+                                ]
+                            },
+                            "type": "If"
+                        },
+                        "HTTP_Get_FileCapacity": {
+                            "runAfter": {
+                                "Initialize_processlog": [
+                                    "Succeeded"
+                                ]
+                            },
+                            "type": "Http",
+                            "inputs": {
+                                "authentication": {
+                                    "type": "ManagedServiceIdentity"
+                                },
+                                "method": "GET",
+                                "uri": "https://management.azure.com/subscriptions/@{variables('subscription_id')}/resourceGroups/@{variables('resourcegroupname')}/providers/Microsoft.Storage/storageAccounts/@{variables('storageaccountname')}/fileServices/default/providers/microsoft.insights/metrics?metricnames=FileCapacity&interval=PT1H&api-version=2018-01-01"
+                            }
+                        },
+                        "HTTP_Get_FileShareCapacityQuota": {
+                            "runAfter": {
+                                "Set_variable_fileCapacity": [
+                                    "Succeeded"
+                                ]
+                            },
+                            "type": "Http",
+                            "inputs": {
+                                "authentication": {
+                                    "type": "ManagedServiceIdentity"
+                                },
+                                "method": "GET",
+                                "uri": "https://management.azure.com/subscriptions/@{variables('subscription_id')}/resourceGroups/@{variables('resourcegroupname')}/providers/Microsoft.Storage/storageAccounts/@{variables('storageaccountname')}/fileServices/default/providers/microsoft.insights/metrics?metricnames=FileShareCapacityQuota&interval=PT1H&api-version=2018-01-01"
+                            }
+                        },
+                        "Initialize_processlog": {
+                            "runAfter": {
+                                "set_variable_-_threshold": [
+                                    "Succeeded"
+                                ]
+                            },
+                            "type": "InitializeVariable",
+                            "inputs": {
+                                "variables": [
+                                    {
+                                        "name": "processlog",
+                                        "type": "string",
+                                        "value": "Azure Files capacity check workflow run start on @{formatDateTime(utcNow(),'yyyy-MM-dd hh:mm:ss')}. "
+                                    }
+                                ]
+                            }
+                        },
+                        "Initialize_variable_-_resource_group_name": {
+                            "runAfter": {
+                                "Initialize_variable_-_subscription_id": [
+                                    "Succeeded"
+                                ]
+                            },
+                            "type": "InitializeVariable",
+                            "inputs": {
+                                "variables": [
+                                    {
+                                        "name": "resourcegroupname",
+                                        "type": "string",
+                                        "value": "[parameters('storageaccount_resourcegroup')]"
+                                    }
+                                ]
+                            }
+                        },
+                        "Initialize_variable_-_storage_account_name": {
+                            "runAfter": {},
+                            "type": "InitializeVariable",
+                            "inputs": {
+                                "variables": [
+                                    {
+                                        "name": "storageaccountname",
+                                        "type": "string",
+                                        "value": "[parameters('storageaccountname')]"
+                                    }
+                                ]
+                            }
+                        },
+                        "Initialize_variable_-_subscription_id": {
+                            "runAfter": {
+                                "Initialize_variable_-_storage_account_name": [
+                                    "Succeeded"
+                                ]
+                            },
+                            "type": "InitializeVariable",
+                            "inputs": {
+                                "variables": [
+                                    {
+                                        "name": "subscription_id",
+                                        "type": "string",
+                                        "value": "[subscription().subscriptionId]"
+                                    }
+                                ]
+                            }
+                        },
+                        "Parse_JSON_-_FileCapacity": {
+                            "runAfter": {
+                                "HTTP_Get_FileCapacity": [
+                                    "Succeeded"
+                                ]
+                            },
+                            "type": "ParseJson",
+                            "inputs": {
+                                "content": "@body('HTTP_Get_FileCapacity')",
+                                "schema": {
+                                    "properties": {
+                                        "cost": {
+                                            "type": "integer"
+                                        },
+                                        "interval": {
+                                            "type": "string"
+                                        },
+                                        "namespace": {
+                                            "type": "string"
+                                        },
+                                        "resourceregion": {
+                                            "type": "string"
+                                        },
+                                        "timespan": {
+                                            "type": "string"
+                                        },
+                                        "value": {
+                                            "items": {
+                                                "properties": {
+                                                    "displayDescription": {
+                                                        "type": "string"
+                                                    },
+                                                    "errorCode": {
+                                                        "type": "string"
+                                                    },
+                                                    "id": {
+                                                        "type": "string"
+                                                    },
+                                                    "name": {
+                                                        "properties": {
+                                                            "localizedValue": {
+                                                                "type": "string"
+                                                            },
+                                                            "value": {
+                                                                "type": "string"
+                                                            }
+                                                        },
+                                                        "type": "object"
+                                                    },
+                                                    "timeseries": {
+                                                        "items": {
+                                                            "properties": {
+                                                                "data": {
+                                                                    "items": {
+                                                                        "properties": {
+                                                                            "average": {
+                                                                                "type": "integer"
+                                                                            },
+                                                                            "timeStamp": {
+                                                                                "type": "string"
+                                                                            }
+                                                                        },
+                                                                        "required": [
+                                                                            "timeStamp",
+                                                                            "average"
+                                                                        ],
+                                                                        "type": "object"
+                                                                    },
+                                                                    "type": "array"
+                                                                },
+                                                                "metadatavalues": {
+                                                                    "type": "array"
+                                                                }
+                                                            },
+                                                            "required": [
+                                                                "metadatavalues",
+                                                                "data"
+                                                            ],
+                                                            "type": "object"
+                                                        },
+                                                        "type": "array"
+                                                    },
+                                                    "type": {
+                                                        "type": "string"
+                                                    },
+                                                    "unit": {
+                                                        "type": "string"
+                                                    }
+                                                },
+                                                "required": [
+                                                    "id",
+                                                    "type",
+                                                    "name",
+                                                    "displayDescription",
+                                                    "unit",
+                                                    "timeseries",
+                                                    "errorCode"
+                                                ],
+                                                "type": "object"
+                                            },
+                                            "type": "array"
+                                        }
+                                    },
+                                    "type": "object"
+                                }
+                            }
+                        },
+                        "Parse_JSON_-_FileShareCapacityQuota": {
+                            "runAfter": {
+                                "HTTP_Get_FileShareCapacityQuota": [
+                                    "Succeeded"
+                                ]
+                            },
+                            "type": "ParseJson",
+                            "inputs": {
+                                "content": "@body('HTTP_Get_FileShareCapacityQuota')",
+                                "schema": {
+                                    "properties": {
+                                        "cost": {
+                                            "type": "integer"
+                                        },
+                                        "interval": {
+                                            "type": "string"
+                                        },
+                                        "namespace": {
+                                            "type": "string"
+                                        },
+                                        "resourceregion": {
+                                            "type": "string"
+                                        },
+                                        "timespan": {
+                                            "type": "string"
+                                        },
+                                        "value": {
+                                            "items": {
+                                                "properties": {
+                                                    "displayDescription": {
+                                                        "type": "string"
+                                                    },
+                                                    "errorCode": {
+                                                        "type": "string"
+                                                    },
+                                                    "id": {
+                                                        "type": "string"
+                                                    },
+                                                    "name": {
+                                                        "properties": {
+                                                            "localizedValue": {
+                                                                "type": "string"
+                                                            },
+                                                            "value": {
+                                                                "type": "string"
+                                                            }
+                                                        },
+                                                        "type": "object"
+                                                    },
+                                                    "timeseries": {
+                                                        "items": {
+                                                            "properties": {
+                                                                "data": {
+                                                                    "items": {
+                                                                        "properties": {
+                                                                            "average": {
+                                                                                "type": "integer"
+                                                                            },
+                                                                            "timeStamp": {
+                                                                                "type": "string"
+                                                                            }
+                                                                        },
+                                                                        "required": [
+                                                                            "timeStamp",
+                                                                            "average"
+                                                                        ],
+                                                                        "type": "object"
+                                                                    },
+                                                                    "type": "array"
+                                                                },
+                                                                "metadatavalues": {
+                                                                    "type": "array"
+                                                                }
+                                                            },
+                                                            "required": [
+                                                                "metadatavalues",
+                                                                "data"
+                                                            ],
+                                                            "type": "object"
+                                                        },
+                                                        "type": "array"
+                                                    },
+                                                    "type": {
+                                                        "type": "string"
+                                                    },
+                                                    "unit": {
+                                                        "type": "string"
+                                                    }
+                                                },
+                                                "required": [
+                                                    "id",
+                                                    "type",
+                                                    "name",
+                                                    "displayDescription",
+                                                    "unit",
+                                                    "timeseries",
+                                                    "errorCode"
+                                                ],
+                                                "type": "object"
+                                            },
+                                            "type": "array"
+                                        }
+                                    },
+                                    "type": "object"
+                                }
+                            }
+                        },
+                        "Set_variable_fileCapacity": {
+                            "runAfter": {
+                                "Parse_JSON_-_FileCapacity": [
+                                    "Succeeded"
+                                ]
+                            },
+                            "type": "InitializeVariable",
+                            "inputs": {
+                                "variables": [
+                                    {
+                                        "name": "fileCapacity",
+                                        "type": "float",
+                                        "value": "@body('Parse_JSON_-_FileCapacity')['value'][0]['timeseries'][0]['data'][0]['average']"
+                                    }
+                                ]
+                            }
+                        },
+                        "Set_variable_fileShareCapacityQuota": {
+                            "runAfter": {
+                                "Parse_JSON_-_FileShareCapacityQuota": [
+                                    "Succeeded"
+                                ]
+                            },
+                            "type": "InitializeVariable",
+                            "inputs": {
+                                "variables": [
+                                    {
+                                        "name": "fileShareCapacityQuota",
+                                        "type": "float",
+                                        "value": "@body('Parse_JSON_-_FileShareCapacityQuota')['value'][0]['timeseries'][0]['data'][0]['average']"
+                                    }
+                                ]
+                            }
+                        },
+                        "calculate_fileShareUsagePercent": {
+                            "runAfter": {
+                                "Set_variable_fileShareCapacityQuota": [
+                                    "Succeeded"
+                                ]
+                            },
+                            "type": "InitializeVariable",
+                            "inputs": {
+                                "variables": [
+                                    {
+                                        "name": "fileShareUsagePercent",
+                                        "type": "float",
+                                        "value": "@div(mul(variables('fileCapacity'), 100), variables('fileShareCapacityQuota'))"
+                                    }
+                                ]
+                            }
+                        },
+                        "set_variable_-_threshold": {
+                            "runAfter": {
+                                "Initialize_variable_-_resource_group_name": [
+                                    "Succeeded"
+                                ]
+                            },
+                            "type": "InitializeVariable",
+                            "inputs": {
+                                "variables": [
+                                    {
+                                        "name": "threshold-percentage",
+                                        "type": "float",
+                                        "value": "[parameters('threshold_percentage')]"
+                                    }
+                                ]
+                            }
+                        }
+                    },
+                    "outputs": {}
+                },
+                "parameters": {
+                    "$connections": {
+                        "value": {
+                            "slack": {
+                                "connectionId": "[resourceId('Microsoft.Web/connections', 'slack')]",
+                                "connectionName": "slack",
+                                "id": "[subscriptionResourceId('Microsoft.Web/locations/managedApis', resourceGroup().location, parameters('connections_slack_name'))]"
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    ]
+}
